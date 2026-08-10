@@ -1,0 +1,4 @@
+/network-scanner
+*.exe
+*.test
+*.out
