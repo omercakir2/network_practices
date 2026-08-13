@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+network-scanner
+*.exe
+*.test
+*.out
+README.md
+Dockerfile
+docker-compose*.yml
+.dockerignore
