@@ -1,11 +1,14 @@
 // Package arpscan performs a concurrent ARP sweep of a local IPv4 subnet.
 //
 // How it works:
-//  1. Open a live pcap handle on the chosen interface (needs root / CAP_NET_RAW
-//     or BPF group membership on macOS).
+//  1. Open two live pcap handles on the chosen interface (needs root /
+//     CAP_NET_RAW or BPF group membership on macOS): one to read replies,
+//     one to send requests. A single handle is a fallback only.
+//     libpcap serializes Read+Write on the same pcap_t, so sharing one
+//     handle with a 200ms read timeout makes a /16 look frozen (~5 pkt/s).
 //  2. Start one reader goroutine that collects ARP replies.
-//  3. A pool of workers serializes and writes ARP request frames for every
-//     host address in the subnet (writes are mutex-protected on the handle).
+//  3. Send ARP requests on the write handle. Sends are serialized (pcap
+//     writes are not goroutine-safe); extra -workers do not speed this up.
 //  4. After all requests are sent, wait a short settle period for stragglers,
 //     then stop the reader and return deduplicated results.
 //
@@ -21,8 +24,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
-	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/google/gopacket"
@@ -31,6 +35,7 @@ import (
 
 	"github.com/local/network-scanner/internal/device"
 	"github.com/local/network-scanner/internal/oui"
+	"github.com/local/network-scanner/internal/pipeline"
 )
 
 // Options controls scan behaviour.
@@ -40,15 +45,31 @@ type Options struct {
 	// Timeout is how long to wait after the last request for late replies
 	// (default 750ms). Per-write operations use a short pcap timeout.
 	Timeout time.Duration
-	// ResolveDNS enables best-effort reverse DNS for each hit.
-	ResolveDNS bool
-	// DNSTimeout bounds each reverse lookup (default 300ms).
-	DNSTimeout time.Duration
-	// SecondaryPing enables a lightweight concurrent TCP connect probe
-	// against common ports. ARP remains the authority for discovery.
-	SecondaryPing bool
 	// Progress, if non-nil, is called with (done, total) as each request is sent.
 	Progress func(done, total int)
+}
+
+// Method adapts Scan to the discovery pipeline. Unlike ICMP it does not
+// implement SoftFailer: a pcap/privilege error is fatal.
+type Method struct{}
+
+// Name implements pipeline.Method. Progress lines use this label.
+func (Method) Name() string { return "arp" }
+
+// Run ARP-probes every address in req.Targets (the full subnet, not just
+// ICMP hits). Translates the shared pipeline.Request into Scan options.
+func (Method) Run(ctx context.Context, req pipeline.Request) ([]device.Device, error) {
+	var progress func(done, total int)
+	if req.Progress != nil {
+		progress = func(done, total int) {
+			req.Progress("arp", done, total)
+		}
+	}
+	return Scan(ctx, req.Iface, req.SrcIP, req.Targets, Options{
+		Workers:  req.Workers,
+		Timeout:  req.Timeout,
+		Progress: progress,
+	})
 }
 
 // Scan ARP-probes every address in targets on the given interface.
@@ -66,21 +87,31 @@ func Scan(ctx context.Context, iface *net.Interface, srcIP net.IP, targets []net
 		return nil, nil
 	}
 
-	// OpenLive snaplen, promiscuous, read timeout.
-	// A non-zero read timeout lets the packet source unblock periodically so
-	// we can notice context cancellation.
-	handle, err := pcap.OpenLive(iface.Name, 65536, true, 200*time.Millisecond)
+	// Two handles: libpcap holds one mutex for Read and Write on a pcap_t.
+	// Sharing a handle with a 200ms read timeout serializes every send behind
+	// that wait (~5 pkt/s) — a /16 then sits on "arp: 10%" for minutes.
+	rx, err := pcap.OpenLive(iface.Name, 65536, true, 50*time.Millisecond)
 	if err != nil {
 		return nil, fmt.Errorf("open pcap on %s: %w", iface.Name, err)
 	}
-	// Closed explicitly after the settle window so the reader unblocks;
-	// use a once-guard so we never double-close.
+	tx, txErr := pcap.OpenLive(iface.Name, 256, false, time.Millisecond)
+	if txErr != nil {
+		tx = rx
+	}
+
 	var closeOnce sync.Once
-	closeHandle := func() { closeOnce.Do(func() { handle.Close() }) }
-	defer closeHandle()
+	closeHandles := func() {
+		closeOnce.Do(func() {
+			rx.Close()
+			if tx != rx {
+				tx.Close()
+			}
+		})
+	}
+	defer closeHandles()
 
 	// Only Ethernet ARP traffic — keeps the reader cheap.
-	if err := handle.SetBPFFilter("arp"); err != nil {
+	if err := rx.SetBPFFilter("arp"); err != nil {
 		return nil, fmt.Errorf("set BPF filter: %w", err)
 	}
 
@@ -96,7 +127,7 @@ func Scan(ctx context.Context, iface *net.Interface, srcIP net.IP, targets []net
 	readerDone.Add(1)
 	go func() {
 		defer readerDone.Done()
-		readARP(handle, iface.HardwareAddr, stop, func(ip net.IP, mac net.HardwareAddr) {
+		readARP(rx, iface.HardwareAddr, stop, func(ip net.IP, mac net.HardwareAddr) {
 			key := ip.String()
 			mu.Lock()
 			if _, exists := seen[key]; !exists {
@@ -127,79 +158,47 @@ func Scan(ctx context.Context, iface *net.Interface, srcIP net.IP, targets []net
 		ComputeChecksums: true,
 	}
 
-	// pcap handles are not safe for concurrent WritePacketData — serialize writes.
-	var writeMu sync.Mutex
-	writeARP := func(dst net.IP) error {
-		ip4 := dst.To4()
-		if ip4 == nil {
-			return nil
-		}
-		// Copy template; mutate destination protocol address.
-		req := arpReq
-		req.DstProtAddress = []byte(ip4)
-
-		buf := gopacket.NewSerializeBuffer()
-		if err := gopacket.SerializeLayers(buf, serializeOpts, &eth, &req); err != nil {
-			return err
-		}
-		writeMu.Lock()
-		err := handle.WritePacketData(buf.Bytes())
-		writeMu.Unlock()
-		return err
-	}
-
-	// Worker pool sends requests concurrently (writes still serialized).
-	jobs := make(chan net.IP, opt.Workers*2)
-	var sendErr atomic.Value // error
-	var sent atomic.Int64
+	// One sender: WritePacketData is not concurrent-safe, so a worker pool
+	// cannot go faster than this loop and only adds lock contention.
+	//
+	// Pace + retry: blasting 65k ARP frames on macOS/Wi-Fi fills the BPF/driver
+	// TX ring (ENOBUFS / "No buffer space available") around ~8k packets.
+	inj := newInjector(tx)
+	buf := gopacket.NewSerializeBuffer()
 	total := len(targets)
-
-	workers := opt.Workers
-	if workers > total {
-		workers = total
-	}
-	if workers < 1 {
-		workers = 1
-	}
-
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for ip := range jobs {
-				if ctx.Err() != nil {
-					return
-				}
-				if err := writeARP(ip); err != nil {
-					sendErr.Store(err)
-					return
-				}
-				n := int(sent.Add(1))
-				if opt.Progress != nil {
-					opt.Progress(n, total)
-				}
-			}
-		}()
-	}
-
-	// Feed targets.
-feed:
-	for _, ip := range targets {
+	var sendErr error
+	for i, ip := range targets {
 		if ctx.Err() != nil {
 			break
 		}
-		if sendErr.Load() != nil {
+		ip4 := ip.To4()
+		if ip4 == nil {
+			if opt.Progress != nil {
+				opt.Progress(i+1, total)
+			}
+			continue
+		}
+		req := arpReq
+		req.DstProtAddress = []byte(ip4)
+		if err := buf.Clear(); err != nil {
+			sendErr = err
 			break
 		}
-		select {
-		case <-ctx.Done():
-			break feed
-		case jobs <- ip:
+		if err := gopacket.SerializeLayers(buf, serializeOpts, &eth, &req); err != nil {
+			sendErr = err
+			break
+		}
+		if err := inj.write(ctx, buf.Bytes()); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				break
+			}
+			sendErr = err
+			break
+		}
+		if opt.Progress != nil {
+			opt.Progress(i+1, total)
 		}
 	}
-	close(jobs)
-	wg.Wait()
 
 	// Allow late replies to arrive after the last request.
 	settle := opt.Timeout
@@ -212,12 +211,12 @@ feed:
 
 	// Stop the reader and wait for it to exit.
 	close(stop)
-	// Closing the handle unblocks any pending ReadPacketData.
-	closeHandle()
+	// Closing the read handle unblocks any pending ReadPacketData.
+	closeHandles()
 	readerDone.Wait()
 
-	if err, _ := sendErr.Load().(error); err != nil {
-		return nil, fmt.Errorf("send ARP: %w", err)
+	if sendErr != nil {
+		return nil, fmt.Errorf("send ARP: %w", sendErr)
 	}
 
 	mu.Lock()
@@ -237,13 +236,6 @@ feed:
 		devices = append(devices, d)
 	}
 	mu.Unlock()
-
-	if opt.ResolveDNS && len(devices) > 0 {
-		resolveHostnames(ctx, devices, opt.DNSTimeout)
-	}
-	if opt.SecondaryPing && len(devices) > 0 {
-		secondaryProbe(ctx, devices, opt.Timeout)
-	}
 
 	return devices, nil
 }
@@ -297,75 +289,87 @@ func defaults(o Options) Options {
 	if o.Timeout <= 0 {
 		o.Timeout = 750 * time.Millisecond
 	}
-	if o.DNSTimeout <= 0 {
-		o.DNSTimeout = 300 * time.Millisecond
-	}
 	return o
 }
 
-// resolveHostnames fills Hostname via concurrent reverse DNS (best-effort).
-func resolveHostnames(ctx context.Context, devices []device.Device, timeout time.Duration) {
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 32)
-	for i := range devices {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			select {
-			case <-ctx.Done():
-				return
-			case sem <- struct{}{}:
-			}
-			defer func() { <-sem }()
+const (
+	injectBurstMin   = 2
+	injectBurstStart = 8
+	injectBurstMax   = 32
+	injectGap        = time.Millisecond
+	injectRetryMax   = 64
+	injectBackoffMax = 50 * time.Millisecond
+)
 
-			rctx, cancel := context.WithTimeout(ctx, timeout)
-			defer cancel()
-
-			names, err := net.DefaultResolver.LookupAddr(rctx, devices[i].IP.String())
-			if err != nil || len(names) == 0 {
-				return
-			}
-			name := names[0]
-			if len(name) > 0 && name[len(name)-1] == '.' {
-				name = name[:len(name)-1]
-			}
-			devices[i].Hostname = name
-		}(i)
-	}
-	wg.Wait()
+// injector writes frames with a small burst/pause cadence and retries
+// ENOBUFS so a /16 sweep does not abort when the kernel TX ring fills.
+type injector struct {
+	tx    *pcap.Handle
+	burst int // successful writes since last pause
+	limit int // pause after this many writes; shrinks on ENOBUFS
 }
 
-// secondaryProbe tries a quick TCP connect to common ports. Discovery still
-// comes from ARP; this is a lightweight secondary reachability check.
-func secondaryProbe(ctx context.Context, devices []device.Device, timeout time.Duration) {
-	ports := []string{"80", "443", "22", "445", "3389"}
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 32)
+func newInjector(tx *pcap.Handle) *injector {
+	return &injector{tx: tx, limit: injectBurstStart}
+}
 
-	for i := range devices {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			select {
-			case <-ctx.Done():
-				return
-			case sem <- struct{}{}:
+func (in *injector) write(ctx context.Context, frame []byte) error {
+	for try := 0; try < injectRetryMax; try++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := in.tx.WritePacketData(frame)
+		if err == nil {
+			in.burst++
+			if in.burst < in.limit {
+				return nil
 			}
-			defer func() { <-sem }()
-
-			ip := devices[i].IP.String()
-			for _, p := range ports {
-				if ctx.Err() != nil {
-					return
-				}
-				d := net.Dialer{Timeout: timeout}
-				conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip, p))
-				if err == nil {
-					_ = conn.Close()
-					return
-				}
+			in.burst = 0
+			if in.limit < injectBurstMax {
+				in.limit++
 			}
-		}(i)
+			return sleepCtx(ctx, injectGap)
+		}
+		if !isNoBuffer(err) {
+			return err
+		}
+		// TX ring full: slow down and retry this same frame.
+		in.burst = 0
+		if in.limit > injectBurstMin {
+			in.limit /= 2
+		}
+		backoff := time.Duration(4<<try) * time.Millisecond
+		if backoff > injectBackoffMax {
+			backoff = injectBackoffMax
+		}
+		if err := sleepCtx(ctx, backoff); err != nil {
+			return err
+		}
 	}
-	wg.Wait()
+	return errors.New("send: no buffer space available after retries")
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func isNoBuffer(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ENOBUFS) {
+		return true
+	}
+	// pcap wraps the errno as "send: No buffer space available".
+	s := err.Error()
+	return strings.Contains(s, "No buffer space") ||
+		strings.Contains(s, "no buffer space") ||
+		strings.Contains(s, "ENOBUFS")
 }

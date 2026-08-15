@@ -123,7 +123,7 @@ func (ln *LocalNet) Hosts(maxHosts int) ([]net.IP, error) {
 	}
 	if maxHosts > 0 && count > maxHosts {
 		return nil, fmt.Errorf(
-			"subnet %s has %d hosts (max %d); use a narrower interface/subnet",
+			"subnet %s has %d hosts (max %d); use a narrower interface/subnet or raise the host limit",
 			ln.CIDR(), count, maxHosts,
 		)
 	}
