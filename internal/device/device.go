@@ -19,20 +19,33 @@ const (
 	TypeUnknown = "Unknown"
 )
 
+// Neighbor is one LLDP (or similar) adjacency learned after SSH login.
+type Neighbor struct {
+	LocalPort  string
+	RemoteName string
+	RemotePort string
+	RemoteID   string // chassis ID / MAC when present
+}
+
 // SysInfo is inventory collected after a successful SSH login.
 // Zero value means the host was not reached over SSH. The password is never stored.
 type SysInfo struct {
-	User     string
-	Hostname string
-	Model    string
-	Version  string
-	Uptime   string
-	Family   string // e.g. Junos "junos-ex"
+	User      string
+	Hostname  string
+	Model     string
+	Version   string
+	Uptime    string
+	Family    string // e.g. Junos "junos-ex"
+	CPU       string // e.g. "5s 8% / 1m 9% / 5m 10%" or "user 3% idle 95%"
+	Memory    string // e.g. "28%"
+	Temp      string // e.g. "42C"
+	Neighbors []Neighbor
 }
 
 // Empty reports whether no SSH fields were collected.
 func (s SysInfo) Empty() bool {
-	return s.User == "" && s.Hostname == "" && s.Model == "" && s.Version == "" && s.Uptime == "" && s.Family == ""
+	return s.User == "" && s.Hostname == "" && s.Model == "" && s.Version == "" && s.Uptime == "" && s.Family == "" &&
+		s.CPU == "" && s.Memory == "" && s.Temp == "" && len(s.Neighbors) == 0
 }
 
 // VendorUnset reports whether Vendor is empty or a placeholder from OUI lookup.

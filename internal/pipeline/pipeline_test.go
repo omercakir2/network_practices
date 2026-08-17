@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"reflect"
 	"testing"
 
 	"github.com/local/network-scanner/internal/device"
@@ -206,7 +207,7 @@ func TestMergeSysInfo(t *testing.T) {
 	if d.Vendor != "Cisco" {
 		t.Fatalf("Vendor = %q, want Cisco (SSH replaces Unknown)", d.Vendor)
 	}
-	if d.SysInfo != info {
+	if !reflect.DeepEqual(d.SysInfo, info) {
 		t.Fatalf("SysInfo = %+v, want %+v", d.SysInfo, info)
 	}
 }

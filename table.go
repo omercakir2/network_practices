@@ -88,20 +88,60 @@ func printSysInfo(devices []device.Device) {
 	fmt.Println()
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "SSH SYSTEM INFO")
-	fmt.Fprintln(w, "IP\tUSER\tHOSTNAME\tMODEL\tVERSION\tUPTIME")
+	fmt.Fprintln(w, "IP\tUSER\tHOSTNAME\tMODEL\tVERSION\tUPTIME\tCPU\tMEM\tTEMP")
 	for _, d := range rows {
 		host := d.SysInfo.Hostname
 		if host == "" {
 			host = dash(d.Hostname)
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			d.IP.String(),
 			dash(d.SysInfo.User),
 			dash(host),
 			dash(d.SysInfo.Model),
 			dash(d.SysInfo.Version),
 			dash(d.SysInfo.Uptime),
+			dash(d.SysInfo.CPU),
+			dash(d.SysInfo.Memory),
+			dash(d.SysInfo.Temp),
 		)
+	}
+	_ = w.Flush()
+	printNeighbors(rows)
+}
+
+func printNeighbors(devices []device.Device) {
+	var any bool
+	for _, d := range devices {
+		if len(d.SysInfo.Neighbors) > 0 {
+			any = true
+			break
+		}
+	}
+	if !any {
+		return
+	}
+
+	fmt.Println()
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "LLDP NEIGHBORS")
+	fmt.Fprintln(w, "HOST\tLOCAL PORT\tREMOTE NAME\tREMOTE PORT\tREMOTE ID")
+	for _, d := range devices {
+		host := d.IP.String()
+		if d.SysInfo.Hostname != "" {
+			host = d.SysInfo.Hostname
+		} else if d.Hostname != "" {
+			host = d.Hostname
+		}
+		for _, n := range d.SysInfo.Neighbors {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+				host,
+				dash(n.LocalPort),
+				dash(n.RemoteName),
+				dash(n.RemotePort),
+				dash(n.RemoteID),
+			)
+		}
 	}
 	_ = w.Flush()
 }

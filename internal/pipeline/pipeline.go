@@ -117,6 +117,11 @@ func mergeDevice(dst map[string]device.Device, d device.Device) {
 	}
 	if existing.SysInfo.Empty() && !d.SysInfo.Empty() {
 		existing.SysInfo = d.SysInfo
+		if n := len(d.SysInfo.Neighbors); n > 0 {
+			existing.SysInfo.Neighbors = append([]device.Neighbor(nil), d.SysInfo.Neighbors...)
+		}
+	} else if len(existing.SysInfo.Neighbors) == 0 && len(d.SysInfo.Neighbors) > 0 {
+		existing.SysInfo.Neighbors = append([]device.Neighbor(nil), d.SysInfo.Neighbors...)
 	}
 	dst[key] = existing
 }
@@ -149,6 +154,9 @@ func cloneDevice(d device.Device) device.Device {
 	}
 	if d.MAC != nil {
 		out.MAC = append(net.HardwareAddr(nil), d.MAC...)
+	}
+	if n := len(d.SysInfo.Neighbors); n > 0 {
+		out.SysInfo.Neighbors = append([]device.Neighbor(nil), d.SysInfo.Neighbors...)
 	}
 	return out
 }

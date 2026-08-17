@@ -70,7 +70,12 @@ func collect(ctx context.Context, r runner) (device.SysInfo, bool, net.HardwareA
 			mac = parseMAC(raw)
 		}
 	}
-	return info, isNetworkDevice(info, raw), mac
+	netDev := isNetworkDevice(info, raw)
+	if netDev {
+		applyHealth(&info, gatherHealth(ctx, r))
+		info.Neighbors = parseLLDP(gatherLLDP(ctx, r))
+	}
+	return info, netDev, mac
 }
 
 func gatherOutput(ctx context.Context, r runner, exec []string, shell []string) string {
