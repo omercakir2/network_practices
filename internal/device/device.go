@@ -27,11 +27,67 @@ type SysInfo struct {
 	Model    string
 	Version  string
 	Uptime   string
+	Family   string // e.g. Junos "junos-ex"
 }
 
 // Empty reports whether no SSH fields were collected.
 func (s SysInfo) Empty() bool {
-	return s.User == "" && s.Hostname == "" && s.Model == "" && s.Version == "" && s.Uptime == ""
+	return s.User == "" && s.Hostname == "" && s.Model == "" && s.Version == "" && s.Uptime == "" && s.Family == ""
+}
+
+// VendorUnset reports whether Vendor is empty or a placeholder from OUI lookup.
+func VendorUnset(v string) bool {
+	switch strings.TrimSpace(strings.ToLower(v)) {
+	case "", "unknown", "randomized mac":
+		return true
+	}
+	return false
+}
+
+// InferVendor guesses a vendor from SSH model / version / family.
+// Returns "" when nothing matches.
+func InferVendor(s SysInfo) string {
+	blob := strings.ToLower(s.Model + " " + s.Version + " " + s.Family)
+	for _, h := range []struct{ sub, vendor string }{
+		{"junos", "Juniper"},
+		{"juniper", "Juniper"},
+		{"cisco", "Cisco"},
+		{"ios-xe", "Cisco"},
+		{"nx-os", "Cisco"},
+		{"catalyst", "Cisco"},
+		{"huawei", "Huawei"},
+		{"vrp", "Huawei"},
+		{"aruba", "Aruba"},
+		{"procurve", "Aruba"},
+		{"mikrotik", "MikroTik"},
+		{"routeros", "MikroTik"},
+		{"openwrt", "OpenWrt"},
+	} {
+		if strings.Contains(blob, h.sub) {
+			return h.vendor
+		}
+	}
+	m := strings.ToLower(strings.TrimSpace(s.Model))
+	switch {
+	case strings.HasPrefix(m, "ex") && strings.Contains(m, "-"):
+		return "Juniper"
+	case strings.HasPrefix(m, "qfx"), strings.HasPrefix(m, "srx"), strings.HasPrefix(m, "mx"):
+		return "Juniper"
+	case strings.HasPrefix(m, "ws-"), strings.HasPrefix(m, "c29"),
+		strings.HasPrefix(m, "isr"), strings.HasPrefix(m, "asr"):
+		return "Cisco"
+	case strings.HasPrefix(m, "s57"), strings.HasPrefix(m, "s67"):
+		return "Huawei"
+	}
+	// Junos train: 24.4R1-S2.15
+	v := strings.ToLower(s.Version)
+	if strings.Contains(v, "r") && strings.Contains(v, ".") &&
+		(strings.Contains(v, "s") || strings.HasPrefix(m, "ex")) {
+		if len(v) > 0 && v[0] >= '0' && v[0] <= '9' && strings.ContainsAny(v, "rR") {
+			return "Juniper"
+		}
+	}
+	return ""
 }
 
 // Device is one host found on the local subnet.

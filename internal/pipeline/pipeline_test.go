@@ -168,12 +168,13 @@ func TestMergeSysInfo(t *testing.T) {
 	}
 	p := New(
 		stub{name: "arp", devs: []device.Device{
-			{IP: net.IPv4(192, 168, 1, 1), MAC: mac, Status: device.StatusUp, Type: device.TypeUnknown},
+			{IP: net.IPv4(192, 168, 1, 1), MAC: mac, Vendor: "Unknown", Status: device.StatusUp, Type: device.TypeUnknown},
 		}},
 		stub{name: "ssh", devs: []device.Device{
 			{
 				IP:       net.IPv4(192, 168, 1, 1),
 				Hostname: "core-sw",
+				Vendor:   "Cisco",
 				Status:   device.StatusUp,
 				Type:     device.TypeNetwork,
 				SysInfo:  info,
@@ -201,6 +202,9 @@ func TestMergeSysInfo(t *testing.T) {
 	}
 	if d.Type != device.TypeNetwork {
 		t.Fatalf("Type = %q, want %q", d.Type, device.TypeNetwork)
+	}
+	if d.Vendor != "Cisco" {
+		t.Fatalf("Vendor = %q, want Cisco (SSH replaces Unknown)", d.Vendor)
 	}
 	if d.SysInfo != info {
 		t.Fatalf("SysInfo = %+v, want %+v", d.SysInfo, info)

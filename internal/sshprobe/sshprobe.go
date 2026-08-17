@@ -15,6 +15,7 @@ import (
 
 	"github.com/local/network-scanner/internal/device"
 	"github.com/local/network-scanner/internal/envload"
+	"github.com/local/network-scanner/internal/oui"
 	"github.com/local/network-scanner/internal/pipeline"
 )
 
@@ -152,7 +153,7 @@ func (m Method) probeOne(ctx context.Context, ip net.IP, tcpTimeout time.Duratio
 			if err != nil || client == nil {
 				continue
 			}
-			info, netDev := collect(ctx, client)
+			info, netDev, mac := collect(ctx, client)
 			_ = client.Close()
 			info.User = user
 			d := device.Device{
@@ -160,6 +161,13 @@ func (m Method) probeOne(ctx context.Context, ip net.IP, tcpTimeout time.Duratio
 				Status:   device.StatusUp,
 				Hostname: info.Hostname,
 				SysInfo:  info,
+			}
+			if len(mac) > 0 {
+				d.MAC = append(net.HardwareAddr(nil), mac...)
+				d.Vendor = oui.Lookup(mac)
+			}
+			if v := device.InferVendor(info); v != "" && device.VendorUnset(d.Vendor) {
+				d.Vendor = v
 			}
 			if netDev {
 				d.Type = device.TypeNetwork

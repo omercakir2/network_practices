@@ -98,7 +98,7 @@ func mergeDevice(dst map[string]device.Device, d device.Device) {
 	if len(existing.MAC) == 0 && len(d.MAC) > 0 {
 		existing.MAC = append(net.HardwareAddr(nil), d.MAC...)
 	}
-	if existing.Vendor == "" && d.Vendor != "" {
+	if d.Vendor != "" && !device.VendorUnset(d.Vendor) && device.VendorUnset(existing.Vendor) {
 		existing.Vendor = d.Vendor
 	}
 	if existing.Type == "" && d.Type != "" {

@@ -16,6 +16,18 @@ System returned to ROM by power-on
 
 cisco WS-C2960-24TT-L (PowerPC405) processor (revision D0) with 65536K bytes of memory.
 Model number                    : WS-C2960-24TT-L
+Base ethernet MAC Address       : C8:4F:86:C1:82:E6
+`
+
+const junosSystemInfo = `Hostname: lab-ex
+Model: ex4000-24p
+Family: junos-ex
+Junos: 24.4R1-S2.15
+`
+
+const junosChassisMAC = `MAC address information
+  Public base address     00:1f:12:34:56:78
+  Public count            64
 `
 
 const huaweiDisplayVersion = `Huawei Versatile Routing Platform Software
@@ -88,12 +100,15 @@ func TestCollectExecThenStopOnCisco(t *testing.T) {
 		"show version": ciscoShowVersion,
 		"uname -a":     linuxUname,
 	}}
-	info, netDev := collect(context.Background(), f)
+	info, netDev, mac := collect(context.Background(), f)
 	if !netDev {
 		t.Fatal("want network device")
 	}
 	if info.Model != "WS-C2960-24TT-L" {
 		t.Fatalf("Model = %q", info.Model)
+	}
+	if mac.String() != "c8:4f:86:c1:82:e6" {
+		t.Fatalf("MAC = %v, want c8:4f:86:c1:82:e6", mac)
 	}
 }
 
@@ -102,12 +117,60 @@ func TestCollectShellFallback(t *testing.T) {
 		execErr:  errors.New("exec request failed"),
 		shellOut: ciscoShowVersion,
 	}
-	info, netDev := collect(context.Background(), f)
+	info, netDev, _ := collect(context.Background(), f)
 	if !netDev {
 		t.Fatal("want network device from shell fallback")
 	}
 	if info.Hostname != "core-sw" {
 		t.Fatalf("Hostname = %q", info.Hostname)
+	}
+}
+
+func TestParseJunosSystemInformation(t *testing.T) {
+	info := parseSysInfo(junosSystemInfo)
+	if info.Hostname != "lab-ex" {
+		t.Errorf("Hostname = %q, want lab-ex", info.Hostname)
+	}
+	if info.Model != "ex4000-24p" {
+		t.Errorf("Model = %q, want ex4000-24p", info.Model)
+	}
+	if info.Version != "24.4R1-S2.15" {
+		t.Errorf("Version = %q, want 24.4R1-S2.15", info.Version)
+	}
+	if info.Family != "junos-ex" {
+		t.Errorf("Family = %q, want junos-ex", info.Family)
+	}
+	if device.InferVendor(info) != "Juniper" {
+		t.Errorf("vendor = %q, want Juniper", device.InferVendor(info))
+	}
+	if !isNetworkDevice(info, junosSystemInfo) {
+		t.Error("expected network device")
+	}
+}
+
+func TestCollectJunosThenMAC(t *testing.T) {
+	f := &fakeClient{exec: map[string]string{
+		"show system information":    junosSystemInfo,
+		"show chassis mac-addresses": junosChassisMAC,
+	}}
+	info, netDev, mac := collect(context.Background(), f)
+	if !netDev {
+		t.Fatal("want network device")
+	}
+	if info.Model != "ex4000-24p" {
+		t.Fatalf("Model = %q", info.Model)
+	}
+	if info.Version != "24.4R1-S2.15" {
+		t.Fatalf("Version = %q", info.Version)
+	}
+	if mac.String() != "00:1f:12:34:56:78" {
+		t.Fatalf("MAC = %v, want 00:1f:12:34:56:78", mac)
+	}
+}
+
+func TestParseMACMissingOK(t *testing.T) {
+	if parseMAC(junosSystemInfo) != nil {
+		t.Fatal("show system information has no MAC; want nil")
 	}
 }
 

@@ -2,6 +2,7 @@ package sshprobe
 
 import (
 	"context"
+	"net"
 	"regexp"
 	"strings"
 	"time"
@@ -12,6 +13,8 @@ import (
 const cmdTimeout = 5 * time.Second
 
 var execCommands = []string{
+	"show system information",     // Junos CLI (EX/QFX)
+	"cli show system information", // Junos root shell → CLI
 	"show version",
 	"display version",
 	"uname -a",
@@ -24,8 +27,15 @@ var shellCommands = []string{
 	"terminal length 0",
 	"terminal pager 0",
 	"screen-length 0 temporary",
+	"show system information",
 	"show version",
 	"display version",
+}
+
+// Tried only when the version dump did not already contain a MAC.
+var macCommands = []string{
+	"show chassis mac-addresses",
+	"cli show chassis mac-addresses",
 }
 
 var (
@@ -38,13 +48,35 @@ var (
 	reUname        = regexp.MustCompile(`(?i)\bLinux\s+(\S+)\s+(\S+)`)
 	rePrettyName   = regexp.MustCompile(`(?m)^PRETTY_NAME=(.+)$`)
 	reLinuxUptime  = regexp.MustCompile(`\bup\s+(.+?)(?:,\s+\d+\s+users?)`)
+	reJunosModel   = regexp.MustCompile(`(?im)^Model:\s*(\S+)`)
+	reJunosVer     = regexp.MustCompile(`(?im)^Junos:\s*(\S+)`)
+	reJunosHost    = regexp.MustCompile(`(?im)^Hostname:\s*(\S+)`)
+	reJunosFamily  = regexp.MustCompile(`(?im)^Family:\s*(\S+)`)
+	reLabeledMAC   = regexp.MustCompile(`(?i)(?:base ethernet mac address|public base address|hardware address|mac address)\s*:?\s*((?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2})`)
+	reAnyMAC       = regexp.MustCompile(`(?i)(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}`)
 )
 
-func collect(ctx context.Context, r runner) (device.SysInfo, bool) {
+func collect(ctx context.Context, r runner) (device.SysInfo, bool, net.HardwareAddr) {
+	raw := gatherOutput(ctx, r, execCommands, shellCommands)
+	info := parseSysInfo(raw)
+	mac := parseMAC(raw)
+	if mac == nil {
+		extra := gatherOutput(ctx, r, macCommands, nil)
+		if extra != "" {
+			raw = raw + "\n" + extra
+			if info.Model == "" && info.Version == "" {
+				info = parseSysInfo(raw)
+			}
+			mac = parseMAC(raw)
+		}
+	}
+	return info, isNetworkDevice(info, raw), mac
+}
+
+func gatherOutput(ctx context.Context, r runner, exec []string, shell []string) string {
 	var b strings.Builder
 	execOK := false
-
-	for _, cmd := range execCommands {
+	for _, cmd := range exec {
 		if ctx.Err() != nil {
 			break
 		}
@@ -64,20 +96,16 @@ func collect(ctx context.Context, r runner) (device.SysInfo, bool) {
 			break
 		}
 	}
-
-	if !execOK {
+	if !execOK && len(shell) > 0 {
 		cctx, cancel := context.WithTimeout(ctx, cmdTimeout)
-		out, _ := r.ShellOutput(cctx, shellCommands)
+		out, _ := r.ShellOutput(cctx, shell)
 		cancel()
 		out = strings.TrimSpace(out)
 		if out != "" {
 			b.WriteString(out)
 		}
 	}
-
-	raw := b.String()
-	info := parseSysInfo(raw)
-	return info, isNetworkDevice(info, raw)
+	return b.String()
 }
 
 func parseSysInfo(s string) device.SysInfo {
@@ -91,13 +119,21 @@ func parseSysInfo(s string) device.SysInfo {
 		info.Uptime = strings.TrimSpace(m[2])
 	}
 
+	if find(&info.Hostname, reJunosHost, s) {
+		// labeled Junos hostname wins over uptime-line guesses
+	}
+	_ = find(&info.Family, reJunosFamily, s)
+
 	switch {
+	case find(&info.Model, reJunosModel, s):
 	case find(&info.Model, reModelNumber, s):
 	case find(&info.Model, reCiscoModel, s):
 	case find(&info.Model, reHuaweiModel, s):
 	}
 
-	if !find(&info.Version, reCiscoVersion, s) {
+	if find(&info.Version, reJunosVer, s) {
+		// Junos: 24.4R1-S2.15
+	} else if !find(&info.Version, reCiscoVersion, s) {
 		_ = find(&info.Version, reHuaweiVer, s)
 	}
 	if info.Version != "" {
@@ -234,5 +270,37 @@ func isNetworkDevice(info device.SysInfo, raw string) bool {
 	m := strings.ToLower(info.Model)
 	return strings.HasPrefix(m, "ws-") ||
 		strings.HasPrefix(m, "c29") ||
+		strings.HasPrefix(m, "ex") ||
 		strings.Contains(m, "catalyst")
+}
+
+func parseMAC(s string) net.HardwareAddr {
+	if m := reLabeledMAC.FindStringSubmatch(s); len(m) == 2 {
+		if hw := parseHW(m[1]); hw != nil {
+			return hw
+		}
+	}
+	for _, raw := range reAnyMAC.FindAllString(s, -1) {
+		if hw := parseHW(raw); hw != nil {
+			return hw
+		}
+	}
+	return nil
+}
+
+func parseHW(s string) net.HardwareAddr {
+	hw, err := net.ParseMAC(s)
+	if err != nil || len(hw) < 6 {
+		return nil
+	}
+	var z byte
+	for _, b := range hw[:6] {
+		z |= b
+	}
+	if z == 0 {
+		return nil
+	}
+	out := make(net.HardwareAddr, 6)
+	copy(out, hw)
+	return out
 }
