@@ -19,6 +19,21 @@ const (
 	TypeUnknown = "Unknown"
 )
 
+// SysInfo is inventory collected after a successful SSH login.
+// Zero value means the host was not reached over SSH. The password is never stored.
+type SysInfo struct {
+	User     string
+	Hostname string
+	Model    string
+	Version  string
+	Uptime   string
+}
+
+// Empty reports whether no SSH fields were collected.
+func (s SysInfo) Empty() bool {
+	return s.User == "" && s.Hostname == "" && s.Model == "" && s.Version == "" && s.Uptime == ""
+}
+
 // Device is one host found on the local subnet.
 type Device struct {
 	IP       net.IP
@@ -27,6 +42,7 @@ type Device struct {
 	Hostname string
 	Status   string
 	Type     string
+	SysInfo  SysInfo
 }
 
 // InferType applies a basic vendor-name heuristic.

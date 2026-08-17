@@ -23,9 +23,11 @@ import (
 	"github.com/local/network-scanner/internal/arpscan"
 	"github.com/local/network-scanner/internal/device"
 	"github.com/local/network-scanner/internal/enrich"
+	"github.com/local/network-scanner/internal/envload"
 	"github.com/local/network-scanner/internal/icmpping"
 	"github.com/local/network-scanner/internal/iface"
 	"github.com/local/network-scanner/internal/pipeline"
+	"github.com/local/network-scanner/internal/sshprobe"
 )
 
 const (
@@ -41,6 +43,10 @@ func main() {
 }
 
 func run() int {
+	if err := envload.LoadDefault(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: .env: %v\n", err)
+	}
+
 	fs := flag.NewFlagSet(appName, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
@@ -52,7 +58,7 @@ func run() int {
 		noDNS       bool
 		noPing      bool
 		pingCount   int
-		tcpProbe    bool
+		enableSSH   bool
 		quiet       bool
 		showVersion bool
 		maxHosts    int
@@ -66,7 +72,7 @@ func run() int {
 	fs.BoolVar(&noDNS, "no-dns", false, "skip reverse DNS lookups")
 	fs.BoolVar(&noPing, "no-ping", false, "skip the ICMP ping stage")
 	fs.IntVar(&pingCount, "ping-count", icmpping.DefaultAttempts, "max ICMP echo attempts per IP")
-	fs.BoolVar(&tcpProbe, "tcp-probe", false, "also run a lightweight TCP connect probe on discovered hosts")
+	fs.BoolVar(&enableSSH, "ssh", false, "try SSH with SSH_USERS/SSH_PASSWORDS from the environment or .env")
 	fs.BoolVar(&quiet, "quiet", false, "suppress progress output")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 	fs.IntVar(&maxHosts, "max-hosts", defaultMaxHosts, "refuse subnets larger than this many hosts (0 = no limit)")
@@ -97,7 +103,7 @@ EXAMPLES:
   sudo %s -i en0
   sudo %s -workers 128 -timeout 300ms -no-dns
   sudo %s -no-ping
-  sudo %s -tcp-probe
+  sudo %s -ssh                    # needs SSH_USERS and SSH_PASSWORDS in .env
   sudo %s -max-hosts 65534 -scan-timeout 15m   # allow a /16
 
 `, appName, appName, appName, appName, appName, appName)
@@ -142,6 +148,16 @@ EXAMPLES:
 		fmt.Fprintf(os.Stderr, "Workers   : %d  |  ping: off  |  ARP timeout: %s\n", workers, timeout)
 	} else {
 		fmt.Fprintf(os.Stderr, "Workers   : %d  |  ping: %d×%s  |  ARP timeout: %s\n", workers, pingCount, timeout, timeout)
+	}
+
+	sshUsers, sshPasswords, sshPort := sshprobe.CredentialsFromEnv()
+	if enableSSH {
+		if len(sshUsers) == 0 || len(sshPasswords) == 0 {
+			fmt.Fprintf(os.Stderr, "warning: -ssh set but SSH_USERS/SSH_PASSWORDS are empty; skipping SSH stage\n")
+			enableSSH = false
+		} else {
+			fmt.Fprintf(os.Stderr, "SSH       : %d user(s) × %d password(s) on :%d\n", len(sshUsers), len(sshPasswords), sshPort)
+		}
 	}
 	fmt.Fprintln(os.Stderr, "Scanning… (Ctrl-C to abort)")
 
@@ -195,6 +211,13 @@ EXAMPLES:
 		methods = append(methods, icmpping.Method{Attempts: pingCount})
 	}
 	methods = append(methods, arpscan.Method{})
+	if enableSSH {
+		methods = append(methods, sshprobe.Method{
+			Users:     sshUsers,
+			Passwords: sshPasswords,
+			Port:      sshPort,
+		})
+	}
 
 	start := time.Now()
 	devices, err := pipeline.New(methods...).Run(ctx, pipeline.Request{
@@ -231,9 +254,6 @@ EXAMPLES:
 	// Enrichment runs on the merged list so ICMP-only hosts get DNS too.
 	if !noDNS && len(devices) > 0 {
 		enrich.Hostnames(ctx, devices, 300*time.Millisecond)
-	}
-	if tcpProbe && len(devices) > 0 {
-		enrich.TCPProbe(ctx, devices, timeout)
 	}
 
 	// Include this machine itself if the sweep missed it (common: some

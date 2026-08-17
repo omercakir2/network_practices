@@ -155,6 +155,58 @@ func TestFatalErrorStops(t *testing.T) {
 	}
 }
 
+// SSH SysInfo attaches to an ICMP/ARP row. A later empty SysInfo does not wipe it.
+// TypeNetwork from SSH upgrades a previous TypeUnknown.
+func TestMergeSysInfo(t *testing.T) {
+	mac := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
+	info := device.SysInfo{
+		User:     "admin",
+		Hostname: "core-sw",
+		Model:    "WS-C2960",
+		Version:  "15.2(7)E",
+		Uptime:   "3 weeks",
+	}
+	p := New(
+		stub{name: "arp", devs: []device.Device{
+			{IP: net.IPv4(192, 168, 1, 1), MAC: mac, Status: device.StatusUp, Type: device.TypeUnknown},
+		}},
+		stub{name: "ssh", devs: []device.Device{
+			{
+				IP:       net.IPv4(192, 168, 1, 1),
+				Hostname: "core-sw",
+				Status:   device.StatusUp,
+				Type:     device.TypeNetwork,
+				SysInfo:  info,
+			},
+		}},
+		stub{name: "later", devs: []device.Device{
+			{IP: net.IPv4(192, 168, 1, 1), Status: device.StatusUp},
+		}},
+	)
+	devs, err := p.Run(context.Background(), Request{
+		Targets: []net.IP{net.IPv4(192, 168, 1, 1)},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(devs) != 1 {
+		t.Fatalf("got %d devices, want 1", len(devs))
+	}
+	d := devs[0]
+	if d.MAC.String() != mac.String() {
+		t.Fatalf("MAC = %v, want %v", d.MAC, mac)
+	}
+	if d.Hostname != "core-sw" {
+		t.Fatalf("Hostname = %q, want core-sw", d.Hostname)
+	}
+	if d.Type != device.TypeNetwork {
+		t.Fatalf("Type = %q, want %q", d.Type, device.TypeNetwork)
+	}
+	if d.SysInfo != info {
+		t.Fatalf("SysInfo = %+v, want %+v", d.SysInfo, info)
+	}
+}
+
 // New() with no methods is a no-op, not an error.
 func TestEmptyPipeline(t *testing.T) {
 	devs, err := New().Run(context.Background(), Request{})

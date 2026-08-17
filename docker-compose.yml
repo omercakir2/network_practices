@@ -32,6 +32,9 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgres://network:network@127.0.0.1:5432/network?sslmode=disable}
+      SSH_USERS: ${SSH_USERS:-}
+      SSH_PASSWORDS: ${SSH_PASSWORDS:-}
+      SSH_PORT: ${SSH_PORT:-22}
     cap_add:
       - NET_RAW
       - NET_ADMIN

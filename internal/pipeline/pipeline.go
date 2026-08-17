@@ -67,13 +67,13 @@ func (p *Pipeline) Run(ctx context.Context, req Request) ([]device.Device, error
 				}
 				continue
 			}
-			return mapDevices(merged), err
+			return toSlice(merged), err
 		}
 		for _, d := range devs {
 			mergeDevice(merged, d)
 		}
 	}
-	return mapDevices(merged), nil
+	return toSlice(merged), nil
 }
 
 // mergeDevice unions d into dst keyed by IPv4 string.
@@ -103,6 +103,9 @@ func mergeDevice(dst map[string]device.Device, d device.Device) {
 	}
 	if existing.Type == "" && d.Type != "" {
 		existing.Type = d.Type
+	} else if existing.Type == device.TypeUnknown && d.Type == device.TypeNetwork {
+		// SSH confirmed a switch NOS; vendor heuristic had nothing.
+		existing.Type = d.Type
 	}
 	if existing.Hostname == "" && d.Hostname != "" {
 		existing.Hostname = d.Hostname
@@ -112,12 +115,15 @@ func mergeDevice(dst map[string]device.Device, d device.Device) {
 	} else if d.Status == device.StatusUp {
 		existing.Status = device.StatusUp
 	}
+	if existing.SysInfo.Empty() && !d.SysInfo.Empty() {
+		existing.SysInfo = d.SysInfo
+	}
 	dst[key] = existing
 }
 
-// mapDevices flattens the merge map and fills missing Status/Type so the
-// table printer does not show blank cells.
-func mapDevices(m map[string]device.Device) []device.Device {
+// toSlice turns the IP-keyed merge map into a slice and fills missing
+// Status/Type so the table printer does not show blank cells.
+func toSlice(m map[string]device.Device) []device.Device {
 	if len(m) == 0 {
 		return nil
 	}
