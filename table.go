@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -108,6 +109,7 @@ func printSysInfo(devices []device.Device) {
 	}
 	_ = w.Flush()
 	printNeighbors(rows)
+	printIfaceCounters(rows)
 }
 
 func printNeighbors(devices []device.Device) {
@@ -127,12 +129,7 @@ func printNeighbors(devices []device.Device) {
 	fmt.Fprintln(w, "LLDP NEIGHBORS")
 	fmt.Fprintln(w, "HOST\tLOCAL PORT\tREMOTE NAME\tREMOTE PORT\tREMOTE ID")
 	for _, d := range devices {
-		host := d.IP.String()
-		if d.SysInfo.Hostname != "" {
-			host = d.SysInfo.Hostname
-		} else if d.Hostname != "" {
-			host = d.Hostname
-		}
+		host := deviceHost(d)
 		for _, n := range d.SysInfo.Neighbors {
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
 				host,
@@ -144,6 +141,69 @@ func printNeighbors(devices []device.Device) {
 		}
 	}
 	_ = w.Flush()
+}
+
+// printIfaceCounters writes lifetime per-port packet/drop/error counters.
+// Down ports with all-zero counters are omitted so a 48-port box stays readable.
+func printIfaceCounters(devices []device.Device) {
+	type row struct {
+		host string
+		c    device.IfaceCounters
+	}
+	var rows []row
+	for _, d := range devices {
+		host := deviceHost(d)
+		for _, c := range d.SysInfo.Interfaces {
+			if shouldShowIface(c) {
+				rows = append(rows, row{host, c})
+			}
+		}
+	}
+	if len(rows) == 0 {
+		return
+	}
+
+	fmt.Println()
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "INTERFACE COUNTERS (lifetime)")
+	fmt.Fprintln(w, "HOST\tPORT\tADMIN\tLINK\tIN PKTS\tOUT PKTS\tIN DROP\tOUT DROP\tIN ERR\tOUT ERR")
+	for _, r := range rows {
+		c := r.c
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			r.host,
+			dash(c.Name),
+			dash(c.Admin),
+			dash(c.Oper),
+			strconv.FormatUint(c.InPackets, 10),
+			strconv.FormatUint(c.OutPackets, 10),
+			strconv.FormatUint(c.InDrops, 10),
+			strconv.FormatUint(c.OutDrops, 10),
+			strconv.FormatUint(c.InErrors, 10),
+			strconv.FormatUint(c.OutErrors, 10),
+		)
+	}
+	_ = w.Flush()
+}
+
+// shouldShowIface is true for an up link, or any port that already has traffic/errors.
+func shouldShowIface(c device.IfaceCounters) bool {
+	if strings.EqualFold(c.Oper, "up") {
+		return true
+	}
+	return c.InPackets|c.OutPackets|c.InBytes|c.OutBytes|c.InDrops|c.OutDrops|c.InErrors|c.OutErrors != 0
+}
+
+func deviceHost(d device.Device) string {
+	if d.SysInfo.Hostname != "" {
+		return d.SysInfo.Hostname
+	}
+	if d.Hostname != "" {
+		return d.Hostname
+	}
+	if d.IP != nil {
+		return d.IP.String()
+	}
+	return "-"
 }
 
 func dash(s string) string {

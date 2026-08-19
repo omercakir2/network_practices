@@ -74,6 +74,7 @@ func collect(ctx context.Context, r runner) (device.SysInfo, bool, net.HardwareA
 	if netDev {
 		applyHealth(&info, gatherHealth(ctx, r))
 		info.Neighbors = parseLLDP(gatherLLDP(ctx, r))
+		info.Interfaces = parseIfaces(gatherIfaces(ctx, r))
 	}
 	return info, netDev, mac
 }

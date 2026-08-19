@@ -188,4 +188,7 @@ func TestSysInfoEmpty(t *testing.T) {
 	if (device.SysInfo{Model: "x"}).Empty() {
 		t.Fatal("filled SysInfo should not be empty")
 	}
+	if (device.SysInfo{Interfaces: []device.IfaceCounters{{Name: "ge-0/0/0"}}}).Empty() {
+		t.Fatal("SysInfo with interfaces should not be empty")
+	}
 }

@@ -117,11 +117,15 @@ func mergeDevice(dst map[string]device.Device, d device.Device) {
 	}
 	if existing.SysInfo.Empty() && !d.SysInfo.Empty() {
 		existing.SysInfo = d.SysInfo
-		if n := len(d.SysInfo.Neighbors); n > 0 {
-			existing.SysInfo.Neighbors = append([]device.Neighbor(nil), d.SysInfo.Neighbors...)
+		existing.SysInfo.Neighbors = cloneNeighbors(d.SysInfo.Neighbors)
+		existing.SysInfo.Interfaces = cloneIfaces(d.SysInfo.Interfaces)
+	} else {
+		if len(existing.SysInfo.Neighbors) == 0 && len(d.SysInfo.Neighbors) > 0 {
+			existing.SysInfo.Neighbors = cloneNeighbors(d.SysInfo.Neighbors)
 		}
-	} else if len(existing.SysInfo.Neighbors) == 0 && len(d.SysInfo.Neighbors) > 0 {
-		existing.SysInfo.Neighbors = append([]device.Neighbor(nil), d.SysInfo.Neighbors...)
+		if len(existing.SysInfo.Interfaces) == 0 && len(d.SysInfo.Interfaces) > 0 {
+			existing.SysInfo.Interfaces = cloneIfaces(d.SysInfo.Interfaces)
+		}
 	}
 	dst[key] = existing
 }
@@ -155,8 +159,21 @@ func cloneDevice(d device.Device) device.Device {
 	if d.MAC != nil {
 		out.MAC = append(net.HardwareAddr(nil), d.MAC...)
 	}
-	if n := len(d.SysInfo.Neighbors); n > 0 {
-		out.SysInfo.Neighbors = append([]device.Neighbor(nil), d.SysInfo.Neighbors...)
-	}
+	out.SysInfo.Neighbors = cloneNeighbors(d.SysInfo.Neighbors)
+	out.SysInfo.Interfaces = cloneIfaces(d.SysInfo.Interfaces)
 	return out
+}
+
+func cloneNeighbors(in []device.Neighbor) []device.Neighbor {
+	if len(in) == 0 {
+		return nil
+	}
+	return append([]device.Neighbor(nil), in...)
+}
+
+func cloneIfaces(in []device.IfaceCounters) []device.IfaceCounters {
+	if len(in) == 0 {
+		return nil
+	}
+	return append([]device.IfaceCounters(nil), in...)
 }

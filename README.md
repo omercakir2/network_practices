@@ -91,10 +91,11 @@ IP             MAC                VENDOR      HOSTNAME           STATUS  TYPE
 5. **SSH (opt-in, `-ssh`)** — TCP-checks port 22 on every target, then tries
    the cartesian product of `SSH_USERS` × `SSH_PASSWORDS` from the environment
    or a local `.env`. The first successful login collects hostname, model,
-   software version, and uptime. Passwords are never printed. Only the local
-   subnet is probed.
-6. **Output** — results sorted by IP and printed as a table (plus an SSH
-   system-info block when any host was reached).
+   software version, uptime, chassis health, LLDP neighbors, and per-port
+   lifetime interface counters (packets, drops, errors). Passwords are never
+   printed. Only the local subnet is probed.
+6. **Output** — results sorted by IP and printed as a table (plus SSH
+   system-info, LLDP, and interface-counter blocks when any host was reached).
 
 ## Flags
 

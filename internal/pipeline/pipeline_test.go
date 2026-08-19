@@ -212,6 +212,42 @@ func TestMergeSysInfo(t *testing.T) {
 	}
 }
 
+// Interface counters from SSH attach to an ICMP/ARP row and are cloned.
+func TestMergeInterfaces(t *testing.T) {
+	ifaces := []device.IfaceCounters{{
+		Name: "ge-0/0/0", Oper: "up", InPackets: 10, OutDrops: 2,
+	}}
+	p := New(
+		stub{name: "arp", devs: []device.Device{
+			{IP: net.IPv4(192, 168, 1, 1), Status: device.StatusUp},
+		}},
+		stub{name: "ssh", devs: []device.Device{
+			{
+				IP:      net.IPv4(192, 168, 1, 1),
+				Status:  device.StatusUp,
+				SysInfo: device.SysInfo{Interfaces: ifaces},
+			},
+		}},
+	)
+	devs, err := p.Run(context.Background(), Request{
+		Targets: []net.IP{net.IPv4(192, 168, 1, 1)},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(devs) != 1 {
+		t.Fatalf("got %d devices, want 1", len(devs))
+	}
+	got := devs[0].SysInfo.Interfaces
+	if !reflect.DeepEqual(got, ifaces) {
+		t.Fatalf("Interfaces = %#v, want %#v", got, ifaces)
+	}
+	ifaces[0].InPackets = 99
+	if got[0].InPackets != 10 {
+		t.Fatal("Interfaces slice was not cloned")
+	}
+}
+
 // New() with no methods is a no-op, not an error.
 func TestEmptyPipeline(t *testing.T) {
 	devs, err := New().Run(context.Background(), Request{})
